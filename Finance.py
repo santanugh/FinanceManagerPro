@@ -11,11 +11,33 @@ import platform
 import subprocess
 import ctypes
 import updater_utils
+import threading
+import winreg
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
+
+def update_registry_version(version):
+    """
+    Updates the Windows 'Add/Remove Programs' entry to match the current running version.
+    """
+    try:
+        # This is the standard Inno Setup Uninstall Key for the current user
+        # NOTE: The AppId must match what you put in your Inno Setup script!
+        # Your AppId was: {{A3B4C5D6-E7F8-9012-3456-7890ABCDEF12}
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{A3B4C5D6-E7F8-9012-3456-7890ABCDEF12}_is1"
+        
+        # Open the key with Write permissions
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, version)
+            winreg.SetValueEx(key, "VersionMajor", 0, winreg.REG_DWORD, 1) # Optional cleanup
+            
+        logger.info(f"Registry updated to version {version}")
+    except Exception as e:
+        # This is expected if running in Dev mode (not installed via Inno)
+        logger.warning(f"Could not update registry version: {e}")
 
 # --- WINDOWS TASKBAR ICON FIX ---
 try:
@@ -407,12 +429,40 @@ class MiniStat(ft.Container):
 
 # --- MAIN APP ---
 def main(page: ft.Page):
+    # SYNC REGISTRY VERSION
+    # This ensures Control Panel shows the correct version after an auto-update
+    update_registry_version(updater_utils.CURRENT_VERSION)
+
+    # ... (rest of your main code) ...
     page.title = "Finance Manager Pro"
     page.theme_mode = "dark"
     page.padding = 0
     page.window_width = 1300
     page.window_height = 900
     page.fonts = {"Roboto Mono": "https://github.com/google/fonts/raw/main/apache/robotomono/RobotoMono%5Bwght%5D.ttf"}
+
+    # --- UPDATE BUTTON (Hidden by default) ---
+    update_button = ft.ElevatedButton(
+        text="Update Available",
+        icon="system_update",
+        bgcolor="#FFD700",  # Gold color
+        color="black",
+        visible=False,      # Hidden until update found
+        height=35,
+        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8))
+    )
+
+    # --- TOP APP BAR ---
+    page.appbar = ft.AppBar(
+        leading=ft.Icon("account_balance_wallet", color="#2196F3", size=30), # FIXED HERE
+        leading_width=40,
+        title=ft.Text("Finance Manager Pro", weight="bold", color="white", size=20),
+        center_title=False,
+        bgcolor="#1f1f1f",
+        actions=[
+            ft.Container(content=update_button, padding=ft.padding.only(right=20))
+        ]
+    )
 
     # --- APP ICON (absolute path for Windows reliability) ---
     try:
@@ -442,39 +492,56 @@ def main(page: ft.Page):
 
     app_state = {"chart_data": [], "touched_index": -1}
 
-    # --- UPDATE CHECKER UI ---
+# --- UPDATE CHECKER LOGIC ---
     def check_for_update_on_startup():
         try:
-            download_url, version_tag = updater_utils.check_for_updates()
-            if download_url:
+            result = updater_utils.check_for_updates()
+            
+            if result and result[0]:
+                download_url, version_tag, file_size = result
+                
                 def on_update_click(e):
-                    page.overlay.append(ft.AlertDialog(
-                        title=ft.Text("Updating..."),
-                        content=ft.Text("Downloading update. The app will restart automatically."),
-                        modal=True,
-                        open=True
-                    ))
-                    page.update()
-                    updater_utils.run_update_process(download_url)
+                    import shutil
+                    import subprocess
+                    import sys
+                    import ctypes
+                    
+                    # 1. EXTRACT UPDATER
+                    try:
+                        updater_src = resource_path(os.path.join("assets", "updater.exe"))
+                        updater_dest = os.path.join(os.path.dirname(sys.executable), "updater_tool.exe")
+                        shutil.copy(updater_src, updater_dest)
+                    except: return
 
-                # Show a SnackBar at the bottom
-                snack = ft.SnackBar(
-                    content=ft.Text(f"New Update Available: {version_tag}", color="white"),
-                    action="INSTALL NOW",
-                    action_color="#FFD700",  # Gold color
-                    on_action=on_update_click,
-                    duration=0,  # 0 means it won't disappear automatically
-                    bgcolor="#1565C0",
-                    show_close_icon=True
-                )
-                page.overlay.append(snack)
-                snack.open = True
-                page.update()
+                    # 2. CREATE BATCH LAUNCHER
+                    bat_content = f"""
+@echo off
+timeout /t 1 >nul
+start "" "{updater_dest}" "{download_url}" "{version_tag}" "{sys.executable}"
+del "%~f0"
+"""
+                    launcher_bat = "launch.bat"
+                    with open(launcher_bat, "w") as f:
+                        f.write(bat_content)
+
+                    # 3. HIDE WINDOW INSTANTLY (Fixes Black Screen Freeze)
+                    page.window.visible = False
+                    page.update()
+
+                    # 4. RUN BATCH & HARD KILL
+                    os.startfile(launcher_bat)
+                    logger.info("Batch launched. Killing Main App.")
+                    
+                    ctypes.windll.kernel32.ExitProcess(0)
+
+                # SHOW BUTTON
+                update_button.text = f"Update Available ({version_tag})"
+                update_button.on_click = on_update_click
+                update_button.visible = True
+                update_button.update()
+                
         except Exception as e:
             logger.error(f"Update UI Error: {e}")
-
-    # Run the check in the background (so it doesn't freeze the app startup)
-    # We use a slight delay or just run it at the end of main()
 
     # --- Helpers ---
     def handle_date_picked(e, text_field):
@@ -1019,7 +1086,8 @@ def main(page: ft.Page):
     )
 
     page.add(ft.Row([rail, ft.VerticalDivider(width=1), main_area], expand=True))
-    check_for_update_on_startup()
+    timer = threading.Timer(2.0, check_for_update_on_startup)
+    timer.start()
     refresh_dashboard()
     logger.info("UI Initialized")
 
