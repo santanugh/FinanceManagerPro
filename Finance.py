@@ -19,25 +19,33 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 
+import winreg
+
 def update_registry_version(version):
     """
     Updates the Windows 'Add/Remove Programs' entry to match the current running version.
     """
+    # This ID matches your Inno Setup script exactly (The '{{' becomes '{')
+    APP_ID = "{A3B4C5D6-E7F8-9012-3456-7890ABCDEF12}"
+    
     try:
-        # This is the standard Inno Setup Uninstall Key for the current user
-        # NOTE: The AppId must match what you put in your Inno Setup script!
-        # Your AppId was: {{A3B4C5D6-E7F8-9012-3456-7890ABCDEF12}
-        key_path = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{A3B4C5D6-E7F8-9012-3456-7890ABCDEF12}_is1"
+        # Inno Setup appends "_is1" to the AppId for the registry key
+        key_path = f"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{APP_ID}_is1"
         
-        # Open the key with Write permissions
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+        # Try to open the key in HKEY_CURRENT_USER (Since you used {localappdata})
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
+        except FileNotFoundError:
+            logger.info("Registry key not found. (If running locally/debug, this is normal)")
+            return
+
+        with key:
+            # Update the 'DisplayVersion' value
             winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, version)
-            winreg.SetValueEx(key, "VersionMajor", 0, winreg.REG_DWORD, 1) # Optional cleanup
+            logger.info(f"SUCCESS: Control Panel version updated to {version}")
             
-        logger.info(f"Registry updated to version {version}")
     except Exception as e:
-        # This is expected if running in Dev mode (not installed via Inno)
-        logger.warning(f"Could not update registry version: {e}")
+        logger.error(f"Registry Update Failed: {e}")
 
 # --- WINDOWS TASKBAR ICON FIX ---
 try:
